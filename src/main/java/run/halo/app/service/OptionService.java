@@ -1,14 +1,19 @@
 package run.halo.app.service;
 
 import com.qiniu.common.Zone;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
 import org.springframework.lang.NonNull;
 import org.springframework.lang.Nullable;
 import org.springframework.transaction.annotation.Transactional;
 import run.halo.app.exception.MissingPropertyException;
 import run.halo.app.model.dto.OptionDTO;
+import run.halo.app.model.dto.OptionSimpleDTO;
 import run.halo.app.model.entity.Option;
+import run.halo.app.model.enums.PostPermalinkType;
 import run.halo.app.model.enums.ValueEnum;
 import run.halo.app.model.params.OptionParam;
+import run.halo.app.model.params.OptionQuery;
 import run.halo.app.model.properties.PropertyEnum;
 import run.halo.app.service.base.CrudService;
 
@@ -21,6 +26,7 @@ import java.util.Optional;
  * Option service interface.
  *
  * @author johnniang
+ * @author ryanwang
  * @date 2019-03-14
  */
 public interface OptionService extends CrudService<Option, Integer> {
@@ -42,12 +48,27 @@ public interface OptionService extends CrudService<Option, Integer> {
     void save(@Nullable Map<String, Object> options);
 
     /**
-     * SAve multiple options
+     * Save multiple options
      *
      * @param optionParams option params
      */
     @Transactional
     void save(@Nullable List<OptionParam> optionParams);
+
+    /**
+     * Save single option.
+     *
+     * @param optionParam option param
+     */
+    void save(@Nullable OptionParam optionParam);
+
+    /**
+     * Update option by id.
+     *
+     * @param optionId    option id must not be null.
+     * @param optionParam option param must not be null.
+     */
+    void update(@NonNull Integer optionId, @NonNull OptionParam optionParam);
 
     /**
      * Saves a property.
@@ -91,6 +112,24 @@ public interface OptionService extends CrudService<Option, Integer> {
      */
     @NonNull
     List<OptionDTO> listDtos();
+
+    /**
+     * Pages option output dtos.
+     *
+     * @param pageable    page info must not be null
+     * @param optionQuery optionQuery
+     * @return a page of option output dto
+     */
+    Page<OptionSimpleDTO> pageDtosBy(@NonNull Pageable pageable, OptionQuery optionQuery);
+
+    /**
+     * Removes option permanently.
+     *
+     * @param id option id must not be null
+     * @return option detail deleted
+     */
+    @NonNull
+    Option removePermanently(@NonNull Integer id);
 
     /**
      * Get option by key
@@ -157,6 +196,18 @@ public interface OptionService extends CrudService<Option, Integer> {
      * @return property value
      */
     <T> T getByPropertyOrDefault(@NonNull PropertyEnum property, @NonNull Class<T> propertyType, T defaultValue);
+
+    /**
+     * Gets property value by blog property.
+     * <p>
+     * Default value from property default value.
+     *
+     * @param property     blog property must not be null
+     * @param propertyType property type must not be null
+     * @param <T>          property type
+     * @return property value
+     */
+    <T> T getByPropertyOrDefault(@NonNull PropertyEnum property, @NonNull Class<T> propertyType);
 
     /**
      * Gets property value by blog property.
@@ -301,4 +352,91 @@ public interface OptionService extends CrudService<Option, Integer> {
      */
     long getBirthday();
 
+    /**
+     * Get post permalink type.
+     *
+     * @return PostPermalinkType
+     */
+    PostPermalinkType getPostPermalinkType();
+
+    /**
+     * Get sheet custom prefix.
+     *
+     * @return sheet prefix.
+     */
+    String getSheetPrefix();
+
+    /**
+     * Get links page custom prefix.
+     *
+     * @return links page prefix.
+     */
+    String getLinksPrefix();
+
+    /**
+     * Get photos page custom prefix.
+     *
+     * @return photos page prefix.
+     */
+    String getPhotosPrefix();
+
+    /**
+     * Get journals page custom prefix.
+     *
+     * @return journals page prefix.
+     */
+    String getJournalsPrefix();
+
+    /**
+     * Get archives custom prefix.
+     *
+     * @return archives prefix.
+     */
+    String getArchivesPrefix();
+
+    /**
+     * Get categories custom prefix.
+     *
+     * @return categories prefix.
+     */
+    String getCategoriesPrefix();
+
+    /**
+     * Get tags custom prefix.
+     *
+     * @return tags prefix.
+     */
+    String getTagsPrefix();
+
+    /**
+     * Get custom path suffix.
+     *
+     * @return path suffix.
+     */
+    String getPathSuffix();
+
+    /**
+     * Is enabled absolute path.
+     *
+     * @return true or false.
+     */
+    Boolean isEnabledAbsolutePath();
+
+    /**
+     * Replace option url in batch.
+     *
+     * @param oldUrl old blog url.
+     * @param newUrl new blog url.
+     * @return replaced options.
+     */
+    List<OptionDTO> replaceUrl(@NonNull String oldUrl, @NonNull String newUrl);
+
+    /**
+     * Converts to option output dto.
+     *
+     * @param option option must not be null
+     * @return an option output dto
+     */
+    @NonNull
+    OptionSimpleDTO convertToDto(@NonNull Option option);
 }

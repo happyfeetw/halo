@@ -18,12 +18,12 @@ import run.halo.app.event.logger.LogEvent;
 import run.halo.app.exception.BadRequestException;
 import run.halo.app.exception.NotFoundException;
 import run.halo.app.exception.ServiceException;
+import run.halo.app.mail.MailService;
 import run.halo.app.model.dto.EnvironmentDTO;
 import run.halo.app.model.dto.StatisticDTO;
 import run.halo.app.model.entity.User;
 import run.halo.app.model.enums.CommentStatus;
 import run.halo.app.model.enums.LogType;
-import run.halo.app.model.enums.Mode;
 import run.halo.app.model.enums.PostStatus;
 import run.halo.app.model.params.LoginParam;
 import run.halo.app.model.params.ResetPasswordParam;
@@ -39,9 +39,14 @@ import run.halo.app.utils.HaloUtils;
 
 import java.io.File;
 import java.io.IOException;
+import java.io.RandomAccessFile;
 import java.lang.management.ManagementFactory;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
@@ -126,6 +131,7 @@ public class AdminServiceImpl implements AdminService {
         this.mode = mode;
     }
 
+
     @Override
     public AuthToken authenticate(LoginParam loginParam) {
         Assert.notNull(loginParam, "Login param must not be null");
@@ -139,7 +145,7 @@ public class AdminServiceImpl implements AdminService {
         try {
             // Get user by username or email
             user = Validator.isEmail(username) ?
-                    userService.getByEmailOfNonNull(username) : userService.getByUsernameOfNonNull(username);
+                userService.getByEmailOfNonNull(username) : userService.getByUsernameOfNonNull(username);
         } catch (NotFoundException e) {
             log.error("Failed to find user by name: " + username, e);
             eventPublisher.publishEvent(new LogEvent(this, loginParam.getUsername(), LogType.LOGIN_FAILED, loginParam.getUsername()));
@@ -204,12 +210,6 @@ public class AdminServiceImpl implements AdminService {
             throw new ServiceException("已经获取过验证码，不能重复获取");
         });
 
-        Boolean emailEnabled = optionService.getByPropertyOrDefault(EmailProperties.ENABLED, Boolean.class, false);
-
-        if (!emailEnabled) {
-            throw new ServiceException("未启用 SMTP 服务");
-        }
-
         if (!userService.verifyUser(param.getUsername(), param.getEmail())) {
             throw new ServiceException("用户名或者邮箱验证错误");
         }
@@ -219,12 +219,18 @@ public class AdminServiceImpl implements AdminService {
 
         log.info("Get reset password code:{}", code);
 
-        // Send email to administrator.
-        String content = "您正在进行密码重置操作，如不是本人操作，请尽快做好相应措施。密码重置验证码如下（五分钟有效）：\n" + code;
-        mailService.sendMail(param.getEmail(), "找回密码验证码", content);
-
         // Cache code.
         cacheStore.putAny("code", code, 5, TimeUnit.MINUTES);
+
+        Boolean emailEnabled = optionService.getByPropertyOrDefault(EmailProperties.ENABLED, Boolean.class, false);
+
+        if (!emailEnabled) {
+            throw new ServiceException("未启用 SMTP 服务，无法发送邮件，但是你可以通过系统日志找到验证码");
+        }
+
+        // Send email to administrator.
+        String content = "您正在进行密码重置操作，如不是本人操作，请尽快做好相应措施。密码重置验证码如下（五分钟有效）：\n" + code;
+        mailService.sendTextMail(param.getEmail(), "找回密码验证码", content);
     }
 
     @Override
@@ -295,7 +301,7 @@ public class AdminServiceImpl implements AdminService {
 
         environmentDTO.setVersion(HaloConst.HALO_VERSION);
 
-        environmentDTO.setMode(Mode.valueFrom(this.mode));
+        environmentDTO.setMode(haloProperties.getMode());
 
         return environmentDTO;
     }
@@ -305,14 +311,14 @@ public class AdminServiceImpl implements AdminService {
         Assert.hasText(refreshToken, "Refresh token must not be blank");
 
         Integer userId = cacheStore.getAny(SecurityUtils.buildTokenRefreshKey(refreshToken), Integer.class)
-                .orElseThrow(() -> new BadRequestException("登陆状态已失效，请重新登陆").setErrorData(refreshToken));
+            .orElseThrow(() -> new BadRequestException("登录状态已失效，请重新登录").setErrorData(refreshToken));
 
         // Get user info
         User user = userService.getById(userId);
 
         // Remove all token
         cacheStore.getAny(SecurityUtils.buildAccessTokenKey(user), String.class)
-                .ifPresent(accessToken -> cacheStore.delete(SecurityUtils.buildTokenAccessKey(accessToken)));
+            .ifPresent(accessToken -> cacheStore.delete(SecurityUtils.buildTokenAccessKey(accessToken)));
         cacheStore.delete(SecurityUtils.buildTokenRefreshKey(refreshToken));
         cacheStore.delete(SecurityUtils.buildAccessTokenKey(user));
         cacheStore.delete(SecurityUtils.buildRefreshTokenKey(user));
@@ -327,54 +333,53 @@ public class AdminServiceImpl implements AdminService {
         ResponseEntity<Map> responseEntity = restTemplate.getForEntity(HaloConst.HALO_ADMIN_RELEASES_LATEST, Map.class);
 
         if (responseEntity == null ||
-                responseEntity.getStatusCode().isError() ||
-                responseEntity.getBody() == null) {
+            responseEntity.getStatusCode().isError() ||
+            responseEntity.getBody() == null) {
             log.debug("Failed to request remote url: [{}]", HALO_ADMIN_RELEASES_LATEST);
             throw new ServiceException("系统无法访问到 Github 的 API").setErrorData(HALO_ADMIN_RELEASES_LATEST);
         }
 
         Object assetsObject = responseEntity.getBody().get("assets");
 
-        if (assetsObject instanceof List) {
-            try {
-                List assets = (List) assetsObject;
-                Map assetMap = (Map) assets.stream()
-                        .filter(assetPredicate())
-                        .findFirst()
-                        .orElseThrow(() -> new ServiceException("Halo admin 最新版暂无资源文件，请稍后再试"));
-
-                Object browserDownloadUrl = assetMap.getOrDefault("browser_download_url", "");
-                // Download the assets
-                ResponseEntity<byte[]> downloadResponseEntity = restTemplate.getForEntity(browserDownloadUrl.toString(), byte[].class);
-
-                if (downloadResponseEntity == null ||
-                        downloadResponseEntity.getStatusCode().isError() ||
-                        downloadResponseEntity.getBody() == null) {
-                    throw new ServiceException("Failed to request remote url: " + browserDownloadUrl.toString()).setErrorData(browserDownloadUrl.toString());
-                }
-
-                String adminTargetName = haloProperties.getWorkDir() + HALO_ADMIN_RELATIVE_PATH;
-
-                Path adminPath = Paths.get(adminTargetName);
-                Path adminBackupPath = Paths.get(haloProperties.getWorkDir(), HALO_ADMIN_RELATIVE_BACKUP_PATH);
-
-                backupAndClearAdminAssetsIfPresent(adminPath, adminBackupPath);
-
-                // Create temp folder
-                Path assetTempPath = FileUtils.createTempDirectory()
-                        .resolve(assetMap.getOrDefault("name", "halo-admin-latest.zip").toString());
-
-                // Unzip
-                FileUtils.unzip(downloadResponseEntity.getBody(), assetTempPath);
-
-                // Copy it to template/admin folder
-                FileUtils.copyFolder(FileUtils.tryToSkipZipParentFolder(assetTempPath), adminPath);
-            } catch (Throwable t) {
-                log.error("Failed to update halo admin", t);
-                throw new ServiceException("更新 Halo admin 失败");
-            }
-        } else {
+        if (!(assetsObject instanceof List)) {
             throw new ServiceException("Github API 返回内容有误").setErrorData(assetsObject);
+        }
+
+        try {
+            List assets = (List) assetsObject;
+            Map assetMap = (Map) assets.stream()
+                .filter(assetPredicate())
+                .findFirst()
+                .orElseThrow(() -> new ServiceException("Halo admin 最新版暂无资源文件，请稍后再试"));
+
+            Object browserDownloadUrl = assetMap.getOrDefault("browser_download_url", "");
+            // Download the assets
+            ResponseEntity<byte[]> downloadResponseEntity = restTemplate.getForEntity(browserDownloadUrl.toString(), byte[].class);
+
+            if (downloadResponseEntity == null ||
+                downloadResponseEntity.getStatusCode().isError() ||
+                downloadResponseEntity.getBody() == null) {
+                throw new ServiceException("Failed to request remote url: " + browserDownloadUrl.toString()).setErrorData(browserDownloadUrl.toString());
+            }
+
+            String adminTargetName = haloProperties.getWorkDir() + HALO_ADMIN_RELATIVE_PATH;
+
+            Path adminPath = Paths.get(adminTargetName);
+            Path adminBackupPath = Paths.get(haloProperties.getWorkDir(), HALO_ADMIN_RELATIVE_BACKUP_PATH);
+
+            backupAndClearAdminAssetsIfPresent(adminPath, adminBackupPath);
+
+            // Create temp folder
+            Path assetTempPath = FileUtils.createTempDirectory()
+                .resolve(assetMap.getOrDefault("name", "halo-admin-latest.zip").toString());
+
+            // Unzip
+            FileUtils.unzip(downloadResponseEntity.getBody(), assetTempPath);
+
+            // Copy it to template/admin folder
+            FileUtils.copyFolder(FileUtils.tryToSkipZipParentFolder(assetTempPath), adminPath);
+        } catch (Throwable t) {
+            throw new ServiceException("更新 Halo admin 失败", t);
         }
     }
 
@@ -433,7 +438,7 @@ public class AdminServiceImpl implements AdminService {
         token.setRefreshToken(HaloUtils.randomUUIDWithoutDash());
 
         // Cache those tokens, just for clearing
-        cacheStore.putAny(SecurityUtils.buildAccessTokenKey(user), token.getAccessToken(), REFRESH_TOKEN_EXPIRED_DAYS, TimeUnit.DAYS);
+        cacheStore.putAny(SecurityUtils.buildAccessTokenKey(user), token.getAccessToken(), ACCESS_TOKEN_EXPIRED_SECONDS, TimeUnit.SECONDS);
         cacheStore.putAny(SecurityUtils.buildRefreshTokenKey(user), token.getRefreshToken(), REFRESH_TOKEN_EXPIRED_DAYS, TimeUnit.DAYS);
 
         // Cache those tokens with user id
@@ -444,12 +449,86 @@ public class AdminServiceImpl implements AdminService {
     }
 
     @Override
-    public String getSpringLogs() {
-        File file = new File(haloProperties.getWorkDir(), LOGS_PATH);
+    public String getApplicationConfig() {
+        File file = new File(haloProperties.getWorkDir(), APPLICATION_CONFIG_NAME);
         if (!file.exists()) {
-            return "暂无日志";
+            return StringUtils.EMPTY;
         }
         FileReader reader = new FileReader(file);
         return reader.readString();
+    }
+
+    @Override
+    public void updateApplicationConfig(String content) {
+        Assert.notNull(content, "Content must not be null");
+
+        Path path = Paths.get(haloProperties.getWorkDir(), APPLICATION_CONFIG_NAME);
+        try {
+            Files.write(path, content.getBytes(StandardCharsets.UTF_8));
+        } catch (IOException e) {
+            throw new ServiceException("保存配置文件失败", e);
+        }
+    }
+
+    @Override
+    public String getLogFiles(Long lines) {
+        Assert.notNull(lines, "Lines must not be null");
+
+        File file = new File(haloProperties.getWorkDir(), LOG_PATH);
+
+        List<String> linesArray = new ArrayList<>();
+
+        StringBuilder result = new StringBuilder();
+
+        if (!file.exists()) {
+            return StringUtils.EMPTY;
+        }
+        long count = 0;
+
+        RandomAccessFile randomAccessFile = null;
+        try {
+            randomAccessFile = new RandomAccessFile(file, "r");
+            long length = randomAccessFile.length();
+            if (length == 0L) {
+                return StringUtils.EMPTY;
+            } else {
+                long pos = length - 1;
+                while (pos > 0) {
+                    pos--;
+                    randomAccessFile.seek(pos);
+                    if (randomAccessFile.readByte() == '\n') {
+                        String line = randomAccessFile.readLine();
+                        linesArray.add(new String(line.getBytes(StandardCharsets.ISO_8859_1), StandardCharsets.UTF_8));
+                        count++;
+                        if (count == lines) {
+                            break;
+                        }
+                    }
+                }
+                if (pos == 0) {
+                    randomAccessFile.seek(0);
+                    linesArray.add(new String(randomAccessFile.readLine().getBytes(StandardCharsets.ISO_8859_1), StandardCharsets.UTF_8));
+                }
+            }
+        } catch (Exception e) {
+            throw new ServiceException("读取日志失败", e);
+        } finally {
+            if (randomAccessFile != null) {
+                try {
+                    randomAccessFile.close();
+                } catch (IOException e) {
+                    e.printStackTrace();
+                }
+            }
+        }
+
+        Collections.reverse(linesArray);
+
+        linesArray.forEach(line -> {
+            result.append(line)
+                .append(StringUtils.LF);
+        });
+
+        return result.toString();
     }
 }
